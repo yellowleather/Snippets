@@ -11,6 +11,7 @@ let dailyScoresEnabled = true; // Default to true, will be updated from server
 let fitnessEnabled = true; // Default to true, will be updated from server
 let currentEndeavor = 'pet project'; // Current active endeavor
 let endeavorsCache = []; // Cache of all endeavors
+let githubAutofillEndeavor = ''; // Endeavor for which GitHub autofill is enabled (empty = disabled)
 let currentView = 'endeavors'; // 'endeavors' or 'fitness'
 let fitnessHabits = []; // Cache of fitness habits
 let fitnessTracking = {}; // Cache of fitness tracking data
@@ -30,6 +31,7 @@ async function loadConfig() {
         reflectionsEnabled = config.reflections_enabled;
         dailyScoresEnabled = config.daily_scores_enabled;
         fitnessEnabled = config.fitness_enabled;
+        githubAutofillEndeavor = config.github_autofill_endeavor || '';
     } catch (error) {
         console.error('Error loading config:', error);
         // Default to true if config fails to load
@@ -430,6 +432,9 @@ function displayWeeks(weeks, snippetsMap, goalsMap, reflectionsMap, scoresMap) {
             html += `      </div>`;
             html += `      <div class="snippet-button-group">`;
             html += `        <button class="add-snippet-btn" onclick="openNewSnippetModalForWeek('${week.week_start}','${week.week_end}')">Add Snippets</button>`;
+            if (githubAutofillEndeavor && currentEndeavor === githubAutofillEndeavor) {
+                html += `        <button class="autofill-github-btn" id="autofill-${week.week_start}" onclick="autofillFromGithub('${week.week_start}','${week.week_end}')">Autofill from GitHub</button>`;
+            }
             // Show "Record Reflection" button only for past weeks (only if feature enabled)
             if (reflectionsEnabled) {
                 const reflection = reflectionsMap[week.week_start];
@@ -976,6 +981,41 @@ async function deleteReflection(reflectionId, skipConfirm = false) {
     } catch (error) {
         console.error('Error deleting reflection:', error);
         alert('Failed to delete reflection');
+    }
+}
+
+async function autofillFromGithub(weekStart, weekEnd) {
+    const btn = document.getElementById(`autofill-${weekStart}`);
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Fetching commits...';
+    }
+
+    try {
+        const response = await fetch('/api/github/autofill-week', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ week_start: weekStart, week_end: weekEnd, endeavor: currentEndeavor }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            alert(data.error || 'Failed to autofill from GitHub');
+            return;
+        }
+
+        // Open the snippet modal pre-populated with the generated summary
+        openNewSnippetModalForWeek(weekStart, weekEnd);
+        document.getElementById('snippetContent').value = data.content;
+    } catch (error) {
+        console.error('Error autofilling from GitHub:', error);
+        alert('Failed to autofill from GitHub');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Autofill from GitHub';
+        }
     }
 }
 

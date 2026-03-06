@@ -501,6 +501,25 @@ nav {
     margin-top: 0;
 }
 
+.autofill-github-btn {
+    padding: 12px 20px;
+    background: white;
+    color: #1a73e8;
+    border: 1px solid #1a73e8;
+    border-radius: 4px;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.autofill-github-btn:hover {
+    background: #e8f0fe;
+}
+
+.autofill-github-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
 .reflection-section {
     margin-top: 30px;
     padding-top: 30px;

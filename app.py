@@ -1,9 +1,15 @@
 import os
 import json
+import requests as http_requests
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
+
+try:
+    import anthropic as anthropic_sdk
+except ImportError:
+    anthropic_sdk = None
 
 # Firestore import
 try:
@@ -27,6 +33,13 @@ GOALS_ENABLED = os.environ.get('GOALS_ENABLED', 'true').lower() == 'true'
 REFLECTIONS_ENABLED = os.environ.get('REFLECTIONS_ENABLED', 'true').lower() == 'true'
 DAILY_SCORES_ENABLED = os.environ.get('DAILY_SCORES_ENABLED', 'true').lower() == 'true'
 FITNESS_ENABLED = os.environ.get('FITNESS_ENABLED', 'true').lower() == 'true'
+
+# GitHub Autofill Configuration
+GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', '')
+GITHUB_USERNAME = os.environ.get('GITHUB_USERNAME', '')
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+# The endeavor name for which the GitHub autofill button is shown (empty = disabled)
+GITHUB_AUTOFILL_ENDEAVOR = os.environ.get('GITHUB_AUTOFILL_ENDEAVOR', '')
 
 def login_required(f):
     @wraps(f)
@@ -78,11 +91,13 @@ def index():
 @login_required
 def get_config():
     """Return feature flags and configuration"""
+    github_autofill_configured = bool(GITHUB_TOKEN and GITHUB_USERNAME and ANTHROPIC_API_KEY)
     return jsonify({
         'goals_enabled': GOALS_ENABLED,
         'reflections_enabled': REFLECTIONS_ENABLED,
         'daily_scores_enabled': DAILY_SCORES_ENABLED,
-        'fitness_enabled': FITNESS_ENABLED
+        'fitness_enabled': FITNESS_ENABLED,
+        'github_autofill_endeavor': GITHUB_AUTOFILL_ENDEAVOR if github_autofill_configured else '',
     })
 
 @app.route('/api/snippets', methods=['GET'])
@@ -900,6 +915,140 @@ def init_default_habits():
         'message': f'Successfully created {len(created_ids)} default habits',
         'habit_ids': created_ids
     })
+
+
+def _fetch_github_commits_for_week(week_start: str, week_end: str) -> list[dict]:
+    """Fetch all commits by the configured user across all their repos for a given week."""
+    headers = {
+        'Authorization': f'token {GITHUB_TOKEN}',
+        'Accept': 'application/vnd.github.v3+json',
+    }
+
+    # List all repos owned by the user (up to 100)
+    repos_resp = http_requests.get(
+        'https://api.github.com/user/repos',
+        headers=headers,
+        params={'per_page': 100, 'type': 'owner', 'sort': 'pushed'},
+        timeout=15,
+    )
+    repos_resp.raise_for_status()
+    repos = repos_resp.json()
+
+    since = f'{week_start}T00:00:00Z'
+    until = f'{week_end}T23:59:59Z'
+
+    all_commits = []
+    for repo in repos:
+        repo_name = repo['name']
+        commits_resp = http_requests.get(
+            f'https://api.github.com/repos/{GITHUB_USERNAME}/{repo_name}/commits',
+            headers=headers,
+            params={'author': GITHUB_USERNAME, 'since': since, 'until': until, 'per_page': 100},
+            timeout=15,
+        )
+        if commits_resp.status_code == 409:
+            # Empty repo
+            continue
+        commits_resp.raise_for_status()
+        commits = commits_resp.json()
+        for c in commits:
+            all_commits.append({
+                'repo': repo_name,
+                'message': c['commit']['message'].split('\n')[0],  # first line only
+                'date': c['commit']['author']['date'][:10],
+            })
+
+    return all_commits
+
+
+def _summarize_commits_with_claude(commits: list[dict], week_start: str, week_end: str) -> str:
+    """Use Claude to turn raw commit list into a concise weekly snippet."""
+    if not anthropic_sdk:
+        return '\n'.join(f"- [{c['repo']}] {c['message']}" for c in commits)
+
+    commits_text = ''
+    by_repo: dict[str, list[str]] = {}
+    for c in commits:
+        by_repo.setdefault(c['repo'], []).append(c['message'])
+
+    for repo, messages in by_repo.items():
+        commits_text += f'\n**{repo}**\n'
+        for m in messages:
+            commits_text += f'  - {m}\n'
+
+    client = anthropic_sdk.Anthropic(api_key=ANTHROPIC_API_KEY)
+    response = client.messages.create(
+        model='claude-haiku-4-5-20251001',
+        max_tokens=600,
+        messages=[{
+            'role': 'user',
+            'content': (
+                f'Below are my GitHub commits for the week of {week_start} to {week_end}, grouped by repository.\n'
+                'Write a concise weekly work summary in this exact markdown format:\n\n'
+                '- RepoName\n'
+                '  - summary of work done\n'
+                '  - another summary\n\n'
+                'Rules:\n'
+                '- Top-level bullet is the repo name (plain text, no bold, no heading)\n'
+                '- 1-3 indented sub-bullets per repo, summarising the work theme — not listing each commit verbatim\n'
+                '- Keep each sub-bullet short (one line)\n'
+                '- Skip trivial commits (merge, version bumps, typos)\n'
+                '- If a repo has only trivial commits, omit it entirely\n'
+                '- No title or heading at the top\n\n'
+                f'Commits:\n{commits_text}'
+            ),
+        }],
+    )
+    return response.content[0].text
+
+
+@app.route('/api/github/autofill-week', methods=['POST'])
+@login_required
+def github_autofill_week():
+    """Fetch GitHub commits for a week, return a Claude-generated snippet summary,
+    and create daily scores for days that have commits."""
+    if not GITHUB_TOKEN or not GITHUB_USERNAME or not ANTHROPIC_API_KEY:
+        return jsonify({'error': 'GitHub autofill is not configured'}), 503
+
+    data = request.get_json()
+    week_start = data.get('week_start')
+    week_end = data.get('week_end')
+    endeavor = data.get('endeavor', 'pet project')
+
+    if not week_start or not week_end:
+        return jsonify({'error': 'week_start and week_end are required'}), 400
+
+    try:
+        commits = _fetch_github_commits_for_week(week_start, week_end)
+    except Exception as e:
+        return jsonify({'error': f'GitHub API error: {str(e)}'}), 502
+
+    if not commits:
+        return jsonify({'error': 'No commits found for this week'}), 404
+
+    try:
+        content = _summarize_commits_with_claude(commits, week_start, week_end)
+    except Exception as e:
+        return jsonify({'error': f'Summarization error: {str(e)}'}), 502
+
+    # Populate daily scores for days that have commits (skip days already scored)
+    dates_scored = 0
+    if FIRESTORE_AVAILABLE and DAILY_SCORES_ENABLED:
+        commit_dates = {c['date'] for c in commits}
+        scores_ref = db.collection('daily_scores')
+        for date in commit_dates:
+            existing = list(scores_ref.where('date', '==', date).where('endeavor', '==', endeavor).limit(1).stream())
+            if not existing:
+                scores_ref.document().set({
+                    'date': date,
+                    'score': 1,
+                    'endeavor': endeavor,
+                    'created_at': firestore.SERVER_TIMESTAMP,
+                    'updated_at': firestore.SERVER_TIMESTAMP,
+                })
+                dates_scored += 1
+
+    return jsonify({'content': content, 'commit_count': len(commits), 'dates_scored': dates_scored})
 
 
 if __name__ == '__main__':

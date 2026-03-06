@@ -67,6 +67,10 @@ sed -e "s|__SNIPPET_USERNAME__|$SNIPPET_USERNAME|g" \
     -e "s|__REFLECTIONS_ENABLED__|$REFLECTIONS_ENABLED|g" \
     -e "s|__DAILY_SCORES_ENABLED__|$DAILY_SCORES_ENABLED|g" \
     -e "s|__FITNESS_ENABLED__|$FITNESS_ENABLED|g" \
+    -e "s|__GITHUB_TOKEN__|$GITHUB_TOKEN|g" \
+    -e "s|__GITHUB_USERNAME__|$GITHUB_USERNAME|g" \
+    -e "s|__ANTHROPIC_API_KEY__|$ANTHROPIC_API_KEY|g" \
+    -e "s|__GITHUB_AUTOFILL_ENDEAVOR__|$GITHUB_AUTOFILL_ENDEAVOR|g" \
     app.yaml.template > app.yaml
 
 echo "Deploying to App Engine..."
